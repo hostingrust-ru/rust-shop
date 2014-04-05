@@ -11,7 +11,7 @@ local SECRET_KEY = 'YOUR SECRET_KEY';
 PLUGIN.Title = "Shop System";
 PLUGIN.Description = "The shop system for human";
 PLUGIN.Author = "Andrew Mensky";
-PLUGIN.Version = 0.12;
+PLUGIN.Version = "Git";
 
 local AUTH_TIME   = 0;
 local EXPIRES_IN  = 0;
@@ -65,6 +65,7 @@ local curTime = util.GetStaticPropertyGetter(UnityEngine.Time, "realtimeSinceSta
 function PLUGIN:Init()
 	print("SHOP plugin loading...");
 
+	self.version = 0.12;
 	self.initialized = false;
 	self.on_auth     = false;
 	self.fatal_errors = {3, 5, 6, 7, 8, 9};
@@ -216,7 +217,7 @@ function PLUGIN:CallApi(api_method, data, onSuccess, onFailure)
 			if (onFailure) then onFailure(err_msg, 0) end;
 			error("SHOP: "..err_msg);
 			return false;
-		elseif (result.plugin_version and result.plugin_version > self.Version) then
+		elseif (result.plugin_version and result.plugin_version > self.version) then
 			self:log("New plugin version available, keep calm and make update.");
 		end;
 
