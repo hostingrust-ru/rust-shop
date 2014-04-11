@@ -65,9 +65,9 @@ local curTime = util.GetStaticPropertyGetter(UnityEngine.Time, "realtimeSinceSta
 function PLUGIN:Init()
 	print("SHOP plugin loading...");
 
-	self.version = 0.12;
-	self.initialized = false;
-	self.on_auth     = false;
+	self.version      = 0.13;
+	self.initialized  = false;
+	self.on_auth      = false;
 	self.fatal_errors = {3, 5, 6, 7, 8, 9};
 
 	self:LoadConfig();
@@ -79,7 +79,12 @@ function PLUGIN:Init()
 	self:AddAdminCommand("shop_auth", self.cmdAuth);
 	self:AddAdminCommand("shop_key", self.cmdKey);
 
-	timer.Once(10, function() self:Auth(true); end);
+	self.re_auth_timer = timer.Once(10, function() self:Auth(true); end);
+end;
+
+-- A function call when plugin has been reload
+function PLUGIN:Unload()
+	if (self.re_auth_timer) then self.re_auth_timer:Destroy(); end;
 end;
 
 -- A function to add admin chat command
@@ -123,6 +128,7 @@ function PLUGIN:LoadConfig()
 	self:InitConfig("debug", true);
 	self:InitConfig("black_list", {-971007166});
 	self:InitConfig("black_as_white", false);
+	self:InitConfig("require_recovery", {});
 
 	config.Save("shop");
 end;
@@ -133,7 +139,7 @@ function PLUGIN:InitConfig(name, default)
 		self.Config = {};
 	end;
 
-	if (self.Config[name] == nil) then
+	if (self.Config[name] == nil or type(self.Config[name]) ~= type(default)) then
 		self.Config[name] = default;
 	end;
 end;
@@ -248,9 +254,9 @@ function PLUGIN:Auth(bRetry)
 		self.on_auth = false;
 
 		-- Create re-auth timer
-		if (self.auth_timer) then self.auth_timer:Destroy(); end;
+		if (self.re_auth_timer) then self.re_auth_timer:Destroy(); end;
 
-		self.auth_timer = timer.Once(EXPIRES_IN, function()
+		self.re_auth_timer = timer.Once(EXPIRES_IN, function()
 			self:Auth(true);
 		end);
 
@@ -271,7 +277,7 @@ function PLUGIN:Auth(bRetry)
 			else
 				self.on_auth = true;
 				self:log("Execute retry auth.");
-				timer.Once(10, function()
+				self.re_auth_timer = timer.Once(10, function()
 					self.on_auth = false;
 					if (not self.initialize) then self:Auth(true); end;
 				end);
@@ -354,6 +360,23 @@ function PLUGIN:modsList(item)
 	return t;
 end;
 
+-- A function return count of free slout in player inventory
+function PLUGIN:FreeSlotsCount(netuser)
+	local inv = rust.GetInventory(netuser);
+	local count = 0;
+
+	if (not inv) then return 0; end;
+
+	for i=0, 35 do
+		if (inv:IsSlotFree(i)) then
+			count = count + 1;
+		end;
+	end;
+
+	return count;
+end;
+
+-- A function to give item with some parameters
 function PLUGIN:GiveItem(netuser, uid, dt)
 	-- Initialize data
 	local datablock = Rust.DatablockDictionary.GetByUniqueID(uid);
@@ -365,6 +388,8 @@ function PLUGIN:GiveItem(netuser, uid, dt)
 		return false, "Datablock not find.";
 	elseif (not inv) then
 		return false, "Player inventory not found.";
+	elseif (self:FreeSlotsCount(netuser) <= 0) then
+		return false, "Has no empty slots.";
 	end;
 
 	-- Give player item
@@ -372,7 +397,8 @@ function PLUGIN:GiveItem(netuser, uid, dt)
 	if (not item) then return false, "Failed to add item."; end;
 
 	-- Set item properties
-	item:SetCondition(tonumber(dt.condition) or 1);
+	item:SetCondition(tonumber(dt.condition) or 1.0);
+	item:SetMaxCondition(tonumber(dt.maxcondition) or 1.0);
 
 	-- Addition mods
 	if (type(item.itemMods) ~= "string") then
@@ -405,6 +431,11 @@ function PLUGIN:cmdBuy(netuser, cmd, args)
 		return false;
 	end;
 
+	if (self:FreeSlotsCount(netuser) <= 0) then
+		self:chat(netuser, "У вас нет свободных слотов для покупки.");
+		return false;
+	end;
+
 	-- Call hook
 	if (plugins.Call("PreCanBuyItem", netuser, barcode) == false) then return false; end;
 
@@ -432,17 +463,20 @@ function PLUGIN:cmdBuy(netuser, cmd, args)
 
 			-- Give item
 			local success, err = self:GiveItem(netuser, tonumber(item.item_id), {
-				uses = item.uses,
-				condition = item.condition,
-				condition = item.condition,
-				modSlots = item.mod_slots,
-				itemMods = item.item_mods or {},
+				uses         = item.uses,
+				condition    = item.condition,
+				maxcondition = item.maxcondition,
+				modSlots     = item.mod_slots,
+				itemMods     = item.item_mods or {},
 			});
 
 			if (success) then
 				plugins.Call("OnBuyItem", netuser, item);
 				self:chat(netuser, "Барыга продал вам товар!");
 			else
+				self.Config.require_recovery[barcode] = { sold = false };
+				config.Save("shop");
+
 				self:chat(netuser, "Барыга передумал: "..err);
 			end;
 		end, function(err)
@@ -487,15 +521,16 @@ function PLUGIN:cmdSell(netuser, cmd, args)
 	-- Generate api data
 	local item_mods = self:modsList(item);
 	local data = {
-		item_id    = item.datablock.uniqueID,
-		price      = price,
-		uses       = tonumber(item.uses) or 1,
-		condition  = item.condition or 1.0,
-		mod_slots  = tonumber(item.totalModSlots) or 0,
-		item_mods  = json.encode(item_mods),
-		owner_id   = uid,
-		owner_name = name,
-		auction    = false,
+		item_id       = item.datablock.uniqueID,
+		price         = price,
+		uses          = tonumber(item.uses) or 1,
+		condition     = item.condition or 1.0,
+		maxcondition  = item.maxcondition or 1.0,
+		mod_slots     = tonumber(item.totalModSlots) or 0,
+		item_mods     = json.encode(item_mods),
+		owner_id      = uid,
+		owner_name    = name,
+		auction       = false,
 	};
 
 	-- Call hook
@@ -503,7 +538,7 @@ function PLUGIN:cmdSell(netuser, cmd, args)
 
 	-- Take item and log hee
 	inv:RemoveItem(self.Config.sell_slot);
-	self:debug("Take item["..item.datablock.uniqueID.."]["..item.datablock.name.."] from '"..name.."' with: { uses: "..item.uses..", condition: "..item.condition..", mods: "..data.item_mods.." }");
+	self:debug("Take item["..item.datablock.uniqueID.."]["..item.datablock.name.."] from '"..name.."' with: { uses: "..item.uses..", condition: "..item.condition.."/"..item.maxcondition..", mods: "..data.item_mods.." }");
 	self:chat(netuser, "Барыга взял вашу вещь на осмотр!");
 
 	-- Call API
@@ -514,10 +549,11 @@ function PLUGIN:cmdSell(netuser, cmd, args)
 		self:chat(netuser, "Код вещи: "..response.barcode);
 	end, function(err)
 		local item = self:GiveItem(netuser, data.item_id, {
-			uses      = data.uses,
-			condition = data.condition,
-			modSlots  = data.mod_slots,
-			itemMods  = item_mods
+			uses         = data.uses,
+			condition    = data.condition,
+			maxcondition = data.maxcondition,
+			modSlots     = data.mod_slots,
+			itemMods     = item_mods
 		});
 
 		self:chat(netuser, "Барыга вернул ваш хлам: "..err);
